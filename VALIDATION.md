@@ -2,125 +2,123 @@
 
 **Date:** 2025-02-14
 **Reviewer:** Devil's Advocate Agent
-**Status:** ✅ **APPROVED** - All critical issues fixed
+**Status:** APPROVED
 
 ---
 
 ## Executive Summary
 
-The aku-agent project has been thoroughly reviewed and tested. Initial critical bugs were identified and immediately fixed. All test cases now pass.
+The aku-agent multi-agent spawning feature has been thoroughly reviewed and tested. All requirements are met, security is sound, and both bash and PowerShell implementations have feature parity.
 
 ---
 
-## Initial Issues Found & Fixed
+## Requirements Validation
 
-### 1. JSON Parsing Bug in `list_agents()` - FIXED ✅
-
-**Severity:** CRITICAL
-**Location:** `files/bash/aku-agent.sh` line 72
-
-**Problem:** Used `jq -r` which outputs multi-line formatted JSON, breaking line-by-line parsing.
-
-**Fix Applied:**
-```bash
-# Before
-list_agents() {
-    cat "$AKU_AGENTS_FILE" | jq -r '.agents[]'
-}
-
-# After
-list_agents() {
-    cat "$AKU_AGENTS_FILE" | jq -c '.agents[]'
-}
-```
-
-### 2. Missing File Permissions - FIXED ✅
-
-**Severity:** HIGH
-**Location:** `files/bash/aku-agent.sh` init() function
-
-**Problem:** No explicit permissions set on sensitive files.
-
-**Fix Applied:**
-```bash
-init() {
-    mkdir -p "$AKU_DIR" "$AKU_LOGS_DIR"
-    chmod 700 "$AKU_DIR" "$AKU_LOGS_DIR"      # Added
-    [[ -f "$AKU_AGENTS_FILE" ]] || echo '{"agents":[]}' > "$AKU_AGENTS_FILE"
-    chmod 600 "$AKU_AGENTS_FILE"               # Added
-}
-```
-
-### 3. Missing Input Validation - FIXED ✅
-
-**Severity:** MEDIUM
-**Location:** `files/bash/aku-agent.sh` cmd_spawn() function
-
-**Problem:** No validation of agent names.
-
-**Fix Applied:**
-```bash
-# Validate agent name (alphanumeric, dash, underscore only)
-if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    err "Invalid agent name '$name'. Use alphanumeric, dash, or underscore only."
-    exit 1
-fi
-```
-
-### 4. Missing Dependency Check - FIXED ✅
-
-**Severity:** LOW
-**Location:** `files/bash/aku-agent.sh`
-
-**Problem:** No check for claude CLI before spawn.
-
-**Fix Applied:**
-```bash
-# Check for claude CLI dependency
-if ! command -v claude &> /dev/null; then
-    echo "Error: claude CLI is required but not found in PATH." >&2
-    echo "Install from: https://claude.ai/code" >&2
-    exit 1
-fi
-```
-
-### 5. Color Code Display Bug - FIXED ✅
-
-**Severity:** LOW
-**Location:** `files/bash/aku-agent.sh` cmd_list() function
-
-**Problem:** `printf` didn't interpret escape sequences in status variable.
-
-**Fix Applied:**
-```bash
-# Changed format specifier from %s to %b
-printf "  %-14s %-8s %-9b %s\n" "$name" "$pid" "$status" "$AKU_LOGS_DIR/${name}.log"
-```
+| Requirement | Expected | Actual | Status |
+|-------------|----------|--------|--------|
+| Agents have NO artificial limits | No hard limits on agent count | No limits in code - any positive integer accepted | PASS |
+| spawn-multi command exists | `aku spawn-multi <count> <prefix> [task]` | Command implemented and working | PASS |
+| bash/pwsh feature parity | Both have spawn-multi | Both implemented with same interface | PASS |
+| .gitignore merged with aku-loop | Combined entries | 160 lines with comprehensive coverage | PASS |
 
 ---
 
-## Security Review
+## Implementation Review
 
-### ✅ Process Spawning - Safe
-- Uses `&` for background execution (bash)
-- Uses `Start-Process` (pwsh)
-- No command injection vectors found
-- All inputs properly quoted
+### 1. spawn-multi Command - IMPLEMENTED
 
-### ✅ File Permissions - Secure
+**Bash Implementation** (lines 188-242):
+- Accepts: `spawn-multi <count> <prefix> [task] [--type <type>]`
+- Expands `{n}` and `{N}` in task template to agent number (1-based)
+- Validates count is numeric
+- Uses shared `spawn_single()` function
+
+**PowerShell Implementation** (lines 179-216):
+- Same interface as bash
+- Template expansion with `-replace '\{n\}', $i`
+- Uses shared `Invoke-SpawnSingle()` function
+
+### 2. .gitignore - MERGED
+
+Now 160 lines (was 12), covering:
+- aku-agent runtime state (`~/.aku/`, `*.prompt.md`)
+- IDE files (VSCode, JetBrains, Vim, Emacs, Sublime)
+- OS files (macOS, Windows, Linux)
+- Environment & secrets
+- Python, Node.js, Rust build artifacts
+- Git merge artifacts
+
+---
+
+## Security Assessment
+
+### Template Injection - SAFE
+
+**Test Performed:**
+```bash
+aku spawn-multi 2 y 'Task $(rm -rf /)'
+aku spawn-multi 1 z 'Task `whoami`'
+```
+
+**Result:** SAFE - The heredoc in bash and here-string in PowerShell protect against command injection. The literal text is written to the prompt file without interpretation.
+
+**Bash Mechanism:**
+```bash
+cat > "$prompt_file" <<EOF
+# Task: $task
+...
+EOF
+```
+The heredoc uses single-pass variable expansion but does NOT execute command substitutions (`$()` or backticks) because `$task` is already a resolved variable value, not re-evaluated.
+
+**PowerShell Mechanism:**
+```powershell
+@"
+# aku-agent: $name
+
+$taskText
+...
+"@ | Out-File -FilePath $promptFile -Encoding utf8
+```
+The here-string (`@"..."@`) treats the content as a literal string.
+
+### Name Conflict Handling - PROPER
+
+**Test Performed:**
+```bash
+aku spawn-multi 2 z 'Task {n}'  # After z-1 already exists
+```
+
+**Result:** Correctly fails for existing agent, continues spawning others:
+```
+Batch spawn complete: 1 succeeded, 1 failed
+```
+
+Each agent is checked individually via `get_agent()` which returns existing agents. The conflict is caught at spawn time for each numbered agent.
+
+### Resource Exhaustion - NO ARTIFICIAL LIMITS
+
+**Finding:** As per requirements, there are NO artificial limits on agent count.
+
+**Assessment:**
+- `spawn-multi 1000` would spawn 1000 processes
+- This is the intended behavior - "Agents have NO artificial limits"
+- Users are responsible for their system resources
+- Documentation should note this (help text includes examples)
+
+### Command Injection - SAFE
+
+**All inputs properly quoted:**
+- Agent names validated with regex `^[a-zA-Z0-9_-]+$`
+- Task content safely inserted via heredoc/here-string
+- No eval or dynamic code execution
+- Process spawning uses direct arguments, not shell string interpolation
+
+### File Permissions - SECURE
+
 - `~/.aku/` directory: 700 (owner only)
 - `~/.aku/agents.json`: 600 (owner only, read/write)
 - Prompt files inherit secure umask
-
-### ✅ Input Validation - Good
-- Agent names validated: alphanumeric, dash, underscore only
-- Rejects: spaces, special characters, path traversal attempts
-- Task descriptions safely escaped in heredocs
-
-### ✅ Process Management - Safe
-- Uses `kill -0` to check if process exists (no signal sent)
-- Clean `--all` stop functionality
-- Orphan process cleanup via `clean` command
 
 ---
 
@@ -128,17 +126,17 @@ printf "  %-14s %-8s %-9b %s\n" "$name" "$pid" "$status" "$AKU_LOGS_DIR/${name}.
 
 | Test Case | Expected | Actual | Status |
 |-----------|----------|--------|--------|
-| `aku help` | Show usage | Shows usage | ✅ PASS |
-| `aku list` (empty) | "(no agents)" | "(no agents)" | ✅ PASS |
-| `aku spawn test "task"` | Create agent | Agent created with proper metadata | ✅ PASS |
-| `aku list` (with agent) | Show agent with colors | Shows green "running" / red "stopped" | ✅ PASS |
-| `aku stop test` | Stop agent | Stops and updates status | ✅ PASS |
-| `aku clean` | Remove stopped | Removes stopped agents only | ✅ PASS |
-| Duplicate name | Error | "Agent 'xxx' already exists" | ✅ PASS |
-| Missing args | Error | "Usage: aku spawn <name> [task]" | ✅ PASS |
-| Agent not found | Error | "Agent not found: xxx" | ✅ PASS |
-| Invalid agent name | Error | "Invalid agent name..." | ✅ PASS |
-| File permissions | 700/600 | Verified with ls -la | ✅ PASS |
+| `aku spawn-multi 3 test "Task {n}"` | 3 agents test-1, test-2, test-3 | 3 agents created | PASS |
+| `aku list` shows all agents | Shows all spawned agents | All 3 shown | PASS |
+| Template expansion {n} | "Task 1", "Task 2", "Task 3" | Correctly expanded | PASS |
+| `aku stop --all` | Stops all agents | All stopped | PASS |
+| `aku clean` | Removes stopped agents | Removed | PASS |
+| Special chars in task | Handled safely | Written literally | PASS |
+| Command injection $(rm -rf /) | Not executed | Literal text in file | PASS |
+| Backtick injection `whoami` | Not executed | Literal text in file | PASS |
+| Name conflict on duplicate | Fail gracefully | "1 succeeded, 1 failed" | PASS |
+| Invalid count (non-numeric) | Error message | "Count must be a number" | PASS |
+| Missing arguments | Error message | Usage shown | PASS |
 
 ---
 
@@ -146,48 +144,61 @@ printf "  %-14s %-8s %-9b %s\n" "$name" "$pid" "$status" "$AKU_LOGS_DIR/${name}.
 
 | Feature | bash | pwsh | Status |
 |---------|------|------|--------|
-| spawn | ✅ | ✅ | ✅ Parity |
-| list | ✅ | ✅ | ✅ Parity |
-| attach | ✅ | ✅ | ✅ Parity |
-| stop | ✅ | ✅ | ✅ Parity |
-| stop --all | ✅ | ✅ | ✅ Parity |
-| clean | ✅ | ✅ | ✅ Parity |
-| logs | ✅ | ✅ | ✅ Parity |
-| name validation | ✅ | ✅ | ✅ Parity |
-| dep check (jq) | ✅ | N/A | N/A (native JSON) |
-| dep check (claude) | ✅ | ✅ | ✅ Parity |
-| file permissions | ✅ | ✅ | ✅ Parity |
+| spawn-multi | PASS | PASS | Parity |
+| {n} expansion | PASS | PASS | Parity |
+| {N} expansion | PASS | PASS | Parity |
+| --type flag | PASS (future use) | PASS (future use) | Parity |
+| count validation | PASS | PASS | Parity |
+| name conflict handling | PASS | PASS | Parity |
+| batch summary | PASS | PASS | Parity |
 
 ---
 
-## Security Assessment Summary
+## Security Matrix
 
 | Category | Status | Notes |
 |----------|--------|-------|
-| Command Injection | ✅ Safe | All inputs properly quoted |
-| Path Traversal | ✅ Safe | Name validation prevents `../` |
-| File Permissions | ✅ Secure | 700 for dirs, 600 for state |
-| Process Orphaning | ✅ Managed | clean command handles cleanup |
-| Credential Leakage | ✅ Safe | No credentials stored |
-| Special Characters | ✅ Safe | Input validation in place |
+| Command Injection | SAFE | Heredoc/here-string protects task content |
+| Path Traversal | SAFE | Name validation prevents `../` |
+| Template Injection | SAFE | `{n}` expansion is numeric substitution only |
+| File Permissions | SECURE | 700 for dirs, 600 for state |
+| Process Orphaning | MANAGED | clean command handles cleanup |
+| Name Conflicts | HANDLED | Fails gracefully, continues batch |
+| Resource Limits | NONE | By design - no artificial limits |
+| Credential Leakage | SAFE | No credentials stored |
 
 ---
 
-## Recommendations for Future Enhancements
+## Recommendations
 
-1. **Log Rotation**: Consider adding log file size limits
-2. **Timeout Option**: Add `--timeout` parameter for spawn
-3. **Status Icons**: Consider Unicode symbols for running/stopped
-4. **Auto-clean**: Add optional auto-cleanup on exit
-5. **Parallel Testing**: Add test suite for concurrent operations
+### Documentation (Optional Enhancements)
+1. Consider adding `--dry-run` flag to preview what would be spawned
+2. Add note in help about resource implications of large counts
+3. Document that `{n}` is 1-based indexing
+
+### Future Enhancements (Not Required)
+1. `--continue-on-error` flag (currently always continues)
+2. `--parallel` vs `--sequential` spawn modes
+3. Agent grouping for batch operations
 
 ---
 
 ## Conclusion
 
-**APPROVED** ✅
+**APPROVED**
 
-All critical bugs have been fixed. The aku-agent is safe for use in isolated development environments. The security posture is good with proper file permissions, input validation, and process management.
+The aku-agent multi-agent spawning feature is:
+- Secure against command and template injection
+- Free of artificial limits as designed
+- Fully implemented in both bash and PowerShell
+- Properly documented with help text
+- Handles errors gracefully
+
+The implementation follows security best practices:
+- Input validation for agent names
+- Safe string handling for task content
+- Proper file permissions
+- Graceful failure handling
 
 **Reminder:** This tool uses `--dangerously-skip-permissions` flag for the Claude CLI. Only use in isolated, trusted development environments.
 
@@ -196,39 +207,30 @@ All critical bugs have been fixed. The aku-agent is safe for use in isolated dev
 ## Test Execution Log
 
 ```
-$ aku help
-✅ Shows usage information
+$ aku spawn-multi 3 test "Task {n}"
+PASS: 3 agents spawned (test-1, test-2, test-3)
+PASS: Template expansion working
 
 $ aku list
-✅ Shows "(no agents)" when empty
+PASS: All 3 agents shown with correct status
 
-$ aku spawn test003 "simple task"
-✅ Agent spawned
-✅ File permissions verified (700/600)
+$ aku spawn-multi 2 x 'Test {n}; echo "safe"'
+PASS: Special characters handled literally
 
-$ aku list
-✅ Shows agent with colored status
+$ aku spawn-multi 2 y 'Task $(rm -rf /)'
+PASS: Command injection attempt - literal text only
 
-$ aku stop test003
-✅ Stops agent and updates status
+$ aku spawn-multi 1 z 'Task `whoami`'
+PASS: Backtick injection - literal text only
+
+$ aku spawn-multi 2 z 'Task {n}'  (z-1 exists)
+PASS: Name conflict handled - "1 succeeded, 1 failed"
+
+$ aku stop --all
+PASS: All agents stopped
 
 $ aku clean
-✅ Removes stopped agents from registry
-
-$ aku list
-✅ Returns to "(no agents)" state
-
-$ aku spawn "bad name!" "test"
-✅ Error: Invalid agent name
-
-$ aku spawn duplicate "test"
-✅ Error: Agent already exists
-
-$ aku stop nonexistent
-✅ Error: Agent not found
-
-$ aku spawn
-✅ Error: Usage message
+PASS: All stopped agents removed
 ```
 
 All tests passed successfully.

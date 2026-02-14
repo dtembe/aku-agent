@@ -5,12 +5,13 @@
 # Usage: aku <command> [options]
 #
 # Commands:
-#   spawn <name> [task]   - Spawn new agent
-#   list                  - List running agents
-#   attach <name>         - Attach to agent output
-#   stop <name>           - Stop agent
-#   clean                 - Remove stopped agents
-#   logs <name>           - View log file
+#   spawn <name> [task]       - Spawn new agent
+#   spawn-multi <count> <prefix> [task]  - Spawn multiple agents
+#   list                      - List running agents
+#   attach <name>             - Attach to agent output
+#   stop <name>               - Stop agent
+#   clean                     - Remove stopped agents
+#   logs <name>               - View log file
 #
 # @author: Dan Tembe
 # @created: 2025-02-14
@@ -107,26 +108,21 @@ is_running() {
     kill -0 "$pid" 2>/dev/null
 }
 
-# SPAWN command
-cmd_spawn() {
-    local name="${1:-}"
-    local task="${2:-No task specified}"
-
-    if [[ -z "$name" ]]; then
-        err "Usage: aku spawn <name> [task]"
-        exit 1
-    fi
+# Core spawn logic (shared by spawn and spawn-multi)
+spawn_single() {
+    local name="$1"
+    local task="$2"
 
     # Validate agent name (alphanumeric, dash, underscore only)
     if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
         err "Invalid agent name '$name'. Use alphanumeric, dash, or underscore only."
-        exit 1
+        return 1
     fi
 
     # Check for duplicate name
     if [[ -n $(get_agent "$name") ]]; then
         err "Agent '$name' already exists"
-        exit 1
+        return 1
     fi
 
     local log_file="$AKU_LOGS_DIR/${name}.log"
@@ -160,6 +156,89 @@ EOF
     echo ""
     echo "  Monitor: aku attach $name"
     echo "  Stop:    aku stop $name"
+}
+
+# SPAWN command
+cmd_spawn() {
+    local name="${1:-}"
+    local task="${2:-No task specified}"
+    local agent_type=""
+
+    # Parse optional --type flag (for future use)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type)
+                agent_type="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$name" ]]; then
+        err "Usage: aku spawn <name> [task] [--type <type>]"
+        exit 1
+    fi
+
+    spawn_single "$name" "$task"
+}
+
+# SPAWN-MULTI command
+cmd_spawn_multi() {
+    local count="${1:-}"
+    local prefix="${2:-}"
+    local task="${3:-No task specified}"
+    local agent_type=""
+
+    # Parse optional --type flag (for future use)
+    while [[ $# -gt 3 ]]; do
+        case "$4" in
+            --type)
+                agent_type="$5"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Validate inputs
+    if [[ -z "$count" || -z "$prefix" ]]; then
+        err "Usage: aku spawn-multi <count> <prefix> [task] [--type <type>]"
+        exit 1
+    fi
+
+    # Validate count is a number
+    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+        err "Count must be a number"
+        exit 1
+    fi
+
+    info "Spawning $count agents with prefix: ${BOLD}$prefix${NC}"
+    echo ""
+
+    local spawned=0
+    local failed=0
+
+    # Spawn N agents
+    for ((i=1; i<=count; i++)); do
+        local name="${prefix}-${i}"
+        # Expand {n} in task to the current number
+        local expanded_task="${task//\{n\}/$i}"
+        local expanded_task_braced="${expanded_task//\{N\}/$i}"
+
+        if spawn_single "$name" "$expanded_task_braced"; then
+            ((spawned++)) || true
+        else
+            ((failed++)) || true
+        fi
+    done
+
+    echo ""
+    info "Batch spawn complete: $spawned succeeded, $failed failed"
 }
 
 # LIST command
@@ -314,17 +393,19 @@ USAGE:
     aku <command> [arguments]
 
 COMMANDS:
-    spawn <name> [task]   Spawn a new independent agent
-    list                  List all agents (running and stopped)
-    attach <name>         Attach to agent's output stream
-    stop <name>           Stop a running agent
-    stop --all            Stop all agents
-    clean                 Remove stopped agents from registry
-    logs <name>           View full log file
+    spawn <name> [task]         Spawn a new independent agent
+    spawn-multi <count> <prefix> [task]  Spawn multiple agents
+    list                        List all agents (running and stopped)
+    attach <name>               Attach to agent's output stream
+    stop <name>                 Stop a running agent
+    stop --all                  Stop all agents
+    clean                       Remove stopped agents from registry
+    logs <name>                 View full log file
 
 EXAMPLES:
     aku spawn frontend "Build React dashboard"
-    aku spawn backend "Create API endpoints"
+    aku spawn-multi 5 worker "Process file {n}"
+    aku spawn-multi 3 agent "Task {n}" --type software-developer
     aku list
     aku attach frontend
     aku stop frontend
@@ -332,6 +413,10 @@ EXAMPLES:
 
 ENVIRONMENT:
     AKU_DIR    Base directory (default: ~/.aku)
+
+NOTES:
+    Use {n} in spawn-multi task to substitute agent number (1-based)
+    The --type flag is accepted for future compatibility
 
 EOF
 }
@@ -344,14 +429,15 @@ main() {
     shift || true
 
     case "$cmd" in
-        spawn|run|new)  cmd_spawn "$@" ;;
-        list|ls|ps)     cmd_list ;;
-        attach|watch)   cmd_attach "$@" ;;
-        stop|kill)      cmd_stop "$@" ;;
-        clean|cleanup)  cmd_clean ;;
-        logs|log)       cmd_logs "$@" ;;
-        help|--help|-h) show_help ;;
-        *)              err "Unknown command: $cmd"; show_help; exit 1 ;;
+        spawn|run|new)        cmd_spawn "$@" ;;
+        spawn-multi)          cmd_spawn_multi "$@" ;;
+        list|ls|ps)           cmd_list ;;
+        attach|watch)         cmd_attach "$@" ;;
+        stop|kill)            cmd_stop "$@" ;;
+        clean|cleanup)        cmd_clean ;;
+        logs|log)             cmd_logs "$@" ;;
+        help|--help|-h)       show_help ;;
+        *)                    err "Unknown command: $cmd"; show_help; exit 1 ;;
     esac
 }
 

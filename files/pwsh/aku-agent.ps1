@@ -4,6 +4,15 @@
 #
 # Usage: aku <command> [options]
 #
+# Commands:
+#   spawn <name> [task]       - Spawn new agent
+#   spawn-multi <count> <prefix> [task]  - Spawn multiple agents
+#   list                      - List running agents
+#   attach <name>             - Attach to agent output
+#   stop <name>               - Stop agent
+#   clean                     - Remove stopped agents
+#   logs <name>               - View log file
+#
 # @author: Dan Tembe
 # @created: 2025-02-14
 # @last_modified: 2025-02-14
@@ -93,33 +102,28 @@ function Test-Running($pid) {
     catch { return $false }
 }
 
-# SPAWN command
-function Invoke-Spawn {
+# Core spawn logic (shared by spawn and spawn-multi)
+function Invoke-SpawnSingle {
     param($name, $task)
-
-    if (-not $name) {
-        Write-Err "Usage: aku spawn <name> [task]"
-        exit 1
-    }
 
     # Validate agent name (alphanumeric, dash, underscore only)
     if ($name -notmatch '^[a-zA-Z0-9_-]+$') {
         Write-Err "Invalid agent name '$name'. Use alphanumeric, dash, or underscore only."
-        exit 1
+        return $false
     }
 
     # Check for claude CLI
     if (-not (Get-Command "claude" -ErrorAction SilentlyContinue)) {
         Write-Err "Error: claude CLI is required but not found in PATH."
         Write-Err "Install from: https://claude.ai/code"
-        exit 1
+        return $false
     }
 
     # Check duplicate
     $agents = Get-Agents
     if ($agents.agents | Where-Object { $_.name -eq $name }) {
         Write-Err "Agent '$name' already exists"
-        exit 1
+        return $false
     }
 
     $logFile = "$LogsDir\$name.log"
@@ -165,6 +169,59 @@ Available commands:
     Write-Host ""
     Write-Host "  Monitor: aku attach $name"
     Write-Host "  Stop:    aku stop $name"
+
+    return $true
+}
+
+# SPAWN command
+function Invoke-Spawn {
+    param($name, $task, $agentType)
+
+    if (-not $name) {
+        Write-Err "Usage: aku spawn <name> [task] [--type <type>]"
+        exit 1
+    }
+
+    Invoke-SpawnSingle -name $name -task $task
+}
+
+# SPAWN-MULTI command
+function Invoke-SpawnMulti {
+    param($count, $prefix, $task, $agentType)
+
+    if (-not $count -or -not $prefix) {
+        Write-Err "Usage: aku spawn-multi <count> <prefix> [task] [--type <type>]"
+        exit 1
+    }
+
+    # Validate count is a number
+    if ($count -notmatch '^\d+$') {
+        Write-Err "Count must be a number"
+        exit 1
+    }
+
+    $countInt = [int]$count
+    Write-Info "Spawning $countInt agents with prefix: $prefix"
+    Write-Host ""
+
+    $spawned = 0
+    $failed = 0
+
+    # Spawn N agents
+    for ($i = 1; $i -le $countInt; $i++) {
+        $name = "${prefix}-${i}"
+        # Expand {n} in task to the current number
+        $expandedTask = $task -replace '\{n\}', $i -replace '\{N\}', $i
+
+        if (Invoke-SpawnSingle -name $name -task $expandedTask) {
+            $spawned++
+        } else {
+            $failed++
+        }
+    }
+
+    Write-Host ""
+    Write-Info "Batch spawn complete: $spawned succeeded, $failed failed"
 }
 
 # LIST command
@@ -327,17 +384,19 @@ USAGE:
     aku <command> [arguments]
 
 COMMANDS:
-    spawn <name> [task]   Spawn a new independent agent
-    list                  List all agents (running and stopped)
-    attach <name>         Attach to agent's output stream
-    stop <name>           Stop a running agent
-    stop --all            Stop all agents
-    clean                 Remove stopped agents from registry
-    logs <name>           View full log file
+    spawn <name> [task]         Spawn a new independent agent
+    spawn-multi <count> <prefix> [task]  Spawn multiple agents
+    list                        List all agents (running and stopped)
+    attach <name>               Attach to agent's output stream
+    stop <name>                 Stop a running agent
+    stop --all                  Stop all agents
+    clean                       Remove stopped agents from registry
+    logs <name>                 View full log file
 
 EXAMPLES:
     aku spawn frontend "Build React dashboard"
-    aku spawn backend "Create API endpoints"
+    aku spawn-multi 5 worker "Process file {n}"
+    aku spawn-multi 3 agent "Task {n}" --type software-developer
     aku list
     aku attach frontend
     aku stop frontend
@@ -345,6 +404,10 @@ EXAMPLES:
 
 ENVIRONMENT:
     AKU_DIR    Base directory (default: ~/.aku)
+
+NOTES:
+    Use {n} in spawn-multi task to substitute agent number (1-based)
+    The --type flag is accepted for future compatibility
 
 '@
 }
@@ -354,6 +417,7 @@ Init
 
 switch ($Command) {
     { $_ -in "spawn", "run", "new" } { Invoke-Spawn $Arguments[0] ($Arguments | Select-Object -Skip 1) -join " " }
+    { $_ -in "spawn-multi" } { Invoke-SpawnMulti $Arguments[0] $Arguments[1] ($Arguments | Select-Object -Skip 2) -join " " }
     { $_ -in "list", "ls", "ps" } { Invoke-List }
     { $_ -in "attach", "watch" } { Invoke-Attach $Arguments[0] }
     { $_ -in "stop", "kill" } { Invoke-Stop $Arguments[0] }
