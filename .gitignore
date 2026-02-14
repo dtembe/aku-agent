@@ -1,0 +1,11 @@
+# Runtime state
+~/.aku/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+.idea/
+
